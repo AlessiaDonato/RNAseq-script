@@ -1,0 +1,612 @@
+---
+title: "cellchat"
+output: html_document
+date: "2025-03-11"
+---
+
+```{r setup_libraries, include=FALSE}
+library(CellChat)
+library(patchwork)
+options(stringsAsFactors = FALSE)
+library(anndata)
+library(zellkonverter)
+library(SingleCellExperiment)
+```
+
+# Set Directory
+
+```{r setup_directory}
+setwd("~/Documents/Cellchat")
+```
+
+-   Prepare required input data for CellChat analysis
+
+-   read the data into R using anndata R package
+
+```{r setup_data}
+ad=read_h5ad("gsto_cellchat.h5ad")
+##access count data matrix
+#counts <- t(as.matrix(ad$layers["counts"]))
+
+##normalize the count data if the normalizeddata is not available in the.h5ad 
+#library.size <- Matrix::colSums(counts)
+#data.input <- as(log1p(Matrix::t(Matrix::t(counts)/library.size) * 10000), 
+#                "dgCMatrix")
+data.input= t(as.matrix(ad$layers["logcounts"]))
+## access meta data
+meta <- ad$obs 
+meta$labels <- meta[["celltype"]] 
+meta$samples<-as.factor(rownames(meta))
+```
+
+# **Create a CellChat object**
+
+```{r}
+cellchat <- createCellChat(object = data.input, meta= meta, group.by = "labels")
+cellchat <- addMeta(cellchat, meta = meta)
+cellchat <- setIdent(cellchat, ident.use = "labels") 
+# set "labels" as default cell identity
+levels(cellchat@idents) # show factor levels of the cell labels
+groupSize <- as.numeric(table(cellchat@idents)) # number of cells in each cell group
+cellchat
+```
+
+# Set the ligand-receptor interaction database use CellChatDB.
+
+```{r}
+CellChatDB <- CellChatDB.mouse  
+showDatabaseCategory(CellChatDB)
+#CellChatDB.human if running on human data
+```
+
+Use all CellChatDB for cell-cell communication analysis We do not suggest to use it in this way because CellChatDB v2 includes "Non-protein Signaling" (i.e., metabolic and synaptic signaling).
+
+## Set the used database in the object
+
+```{r}
+CellChatDB.use <- CellChatDB # simply use the default CellChatDB
+cellchat@DB <- CellChatDB.use
+```
+
+------------------------------------------------------------------------
+
+# Preprocessing the expression data for cell-cell communication analysis
+
+```{r}
+# This step is necessary even if using the whole database
+cellchat <- subsetData(cellchat)
+options(future.globals.maxSize = 1e9) #aumentare se da probelmi di memoria 4 * 1024^3
+options(future.globals.maxSize = 4 * 1024^3) 
+future::plan("multisession", workers = 4) # do parallel
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+
+```
+
+## Compute the communication probability and infer cellular communication network
+
+```{r}
+cellchat <- computeCommunProb(cellchat, type = "triMean")
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+```
+
+## Extract the inferred cellular communication network as a data frame
+
+We provide a function `subsetCommunication` to easily access the inferred cell-cell communications of interest. For example,
+
+-   `df.net <- subsetCommunication(cellchat)` returns a data frame consisting of all the inferred cell-cell communications at the level of ligands/receptors. Set `slot.name = "netP"` to access the the inferred communications at the level of signaling pathways
+
+-   `df.net <- subsetCommunication(cellchat, sources.use = c(1,2), targets.use = c(4,5))` gives the inferred cell-cell communications sending from cell groups 1 and 2 to cell groups 4 and 5.
+
+-   `df.net <- subsetCommunication(cellchat, signaling = c("WNT", "TGFb"))` gives the inferred cell-cell communications mediated by signaling WNT and TGFb.
+
+```{r}
+df.net <- subsetCommunication(cellchat)
+unique(df.net$ligand)
+unique(df.net$receptor)
+unique(df.net$pathway_name)
+#df.net <- subsetCommunication(cellchat, sources.use = c(1,2), targets.use = c(4,5))
+#df.net <- subsetCommunication(cellchat, signaling = c("WNT", "TGFb"))
+```
+
+
+## Infer the cell-cell communication at a signaling pathway level
+
+CellChat computes the communication probability on signaling pathway level by summarizing the communication probabilities of all ligands-receptors interactions associated with each signaling pathway.
+
+NB: The inferred intercellular communication network of each ligand-receptor pair and each signaling pathway is stored in the slot ‘net’ and ‘netP’, respectively.
+
+```{r}
+cellchat <- computeCommunProbPathway(cellchat)
+```
+
+## Calculate the aggregated cell-cell communication network
+
+CellChat calculates the aggregated cell-cell communication network by counting the number of links or summarizing the communication probability. Users can also calculate the aggregated network among a subset of cell groups by setting `sources.use` and `targets.use`.
+
+```{r}
+cellchat <- aggregateNet(cellchat)
+```
+
+## Plot
+
+visualize the aggregated cell-cell communication network. For example, showing the number of interactions or the total interaction strength (weights) between any two cell groups using circle plot
+
+```{r}
+groupSize <- as.numeric(table(cellchat@idents))
+par(mfrow = c(1,2), xpd=TRUE )
+netVisual_circle(cellchat@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+netVisual_circle(cellchat@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+```
+
+```{r}
+#circle plot for target
+groupSize <- as.numeric(table(cellchat@idents))
+par(mfrow = c(1,2), xpd=TRUE )
+netVisual_circle(cellchat@net$count, vertex.weight = groupSize, 
+                 weight.scale = T, label.edge= F,
+                 targets.use =rownames(cellchat@net$count)[1], 
+                 title.name =paste("Number of interactions",
+                                   rownames(cellchat@net$count)[1],sep=" ")
+                 #title.name ="Number of interactions T and NK cell"
+                 )
+netVisual_circle(cellchat@net$weight, vertex.weight = groupSize, weight.scale = T, 
+                 label.edge= F, targets.use =rownames(cellchat@net$count)[1], 
+                 title.name =paste("Interaction weights/strength",
+                                  rownames(cellchat@net$count)[1],sep=" ")
+                 #title.name= "Interaction weights/strength T and NK cell"
+                 )
+```
+
+```{r}
+groupSize <- as.numeric(table(cellchat@idents))
+par(mfrow = c(1,2), xpd=TRUE )
+netVisual_circle(cellchat@net$count, vertex.weight = groupSize, weight.scale = T, 
+                 label.edge= F, 
+                 sources.use = rownames(cellchat@net$count)[1],
+                 title.name =paste("Number of interactions",
+                                   rownames(cellchat@net$count)[1], sep=" ")
+                 #title.name ="Number of interactions T and NK cell"
+                 )
+netVisual_circle(cellchat@net$weight, vertex.weight = groupSize, weight.scale = T, 
+                 label.edge= F, 
+                 sources.use = rownames(cellchat@net$count)[1],
+                 title.name =paste("Interaction weights/strength",
+                                  rownames(cellchat@net$count)[1],sep=" ")
+                 #title.name= "Interaction weights/strength T and NK cell"
+                 )
+```
+
+```{r}
+#circle plot for each source
+mat <- cellchat@net$weight
+par(mfrow = c(1, 1),xpd=TRUE)
+for (i in 1:nrow(mat)) {
+  mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), dimnames = dimnames(mat))
+  mat2[i, ] <- mat[i, ]
+  netVisual_circle(mat2, vertex.weight = groupSize, weight.scale = T, edge.weight.max = max(mat), title.name = rownames(mat)[i])
+  
+}
+```
+
+```{r}
+pathways.show <- c("APP") 
+vertex.receiver = seq(1,10) # a numeric vector. 
+netVisual_aggregate(cellchat, signaling = pathways.show,  vertex.receiver = vertex.receiver)
+# Circle plot
+par(mfrow=c(1,1))
+netVisual_aggregate(cellchat, signaling = pathways.show, layout = "circle")
+```
+
+```{r}
+# Chord diagram
+pdf(file ="cellchat.pdf", width = 20, height =16)
+netVisual_aggregate(cellchat, signaling = pathways.show, layout = "chord")
+dev.off()
+```
+
+```{r}
+#Heatmap on pathways
+par(mfrow=c(1,1))
+netVisual_heatmap(cellchat, color.heatmap = "Reds")
+```
+
+```{r}
+netAnalysis_contribution(cellchat, signaling = pathways.show)
+```
+
+```{r}
+pairLR <- extractEnrichedLR(cellchat, signaling = pathways.show, geneLR.return = FALSE)
+LR.show <- pairLR[1,] # show one ligand-receptor pair
+# Hierarchy plot
+vertex.receiver = seq(1,4) # a numeric vector
+netVisual_individual(cellchat, signaling = pathways.show,  pairLR.use = LR.show, vertex.receiver = vertex.receiver)
+# Circle plot
+netVisual_individual(cellchat, signaling = pathways.show, pairLR.use = LR.show, layout = "circle")
+```
+
+```{r}
+#Chord diagram
+pdf(file ="cellchat_pair.pdf", width = 20, height =16)
+netVisual_individual(cellchat, signaling = pathways.show, pairLR.use = LR.show, layout = "chord")
+dev.off()
+```
+
+------------------------------------------------------------------------
+
+Visualize cell-cell communication mediated by multiple ligand-receptors or signaling pathways show all the significant interactions (L-R pairs) from some cell groups (defined by 'sources.use') to other cell groups (defined by 'targets.use')
+
+```{r}
+levels(df.net$source)
+```
+
+Dot plot
+
+```{r}
+netVisual_bubble(cellchat,remove.isolate = FALSE, sort.by.target = T, 
+                 sort.by.source = F,
+                 font.size = 12)+
+  coord_flip()
+```
+
+Dot plot splitted by source or target
+
+```{r}
+netVisual_bubble(cellchat, sources.use = c(2:6, 13:19),targets.use = c(1, 7:12), 
+                 remove.isolate = FALSE, sort.by.target = T, sort.by.source = F,
+                 font.size = 12)+
+  coord_flip()
+ggsave("immune_rec.png", width = 20, height = 15)
+```
+
+```{r}
+netVisual_bubble(cellchat, sources.use = c(2:6) ,targets.use = c(13:19),
+                 remove.isolate = F, sort.by.target = F,sort.by.source = T, 
+                 font.size = 12)+ 
+  coord_flip()
+ggsave("transf_rec.png",width = 20, height = 15)
+```
+
+```{r}
+netVisual_bubble(cellchat, sources.use = c(13:19) ,targets.use = c(2:6), 
+                 remove.isolate = F, sort.by.target = T, sort.by.source = F,
+                 font.size = 12)+ 
+  coord_flip()
+ggsave("transf_don.png", width = 20, height = 15)
+```
+
+```{r}
+netVisual_bubble(cellchat, sources.use = c(1, 7:12) ,targets.use = c(2:6, 13:19), 
+                 remove.isolate = F, sort.by.target = T, sort.by.source = F, 
+                 font.size = 12)+
+  coord_flip()
+ggsave("immune_don.png", width = 20, height = 15)
+```
+
+show all the significant interactions (L-R pairs) associated with certain signaling pathways
+
+```{r}
+netVisual_bubble(cellchat, sources.use = c(8:14), targets.use = c(1:7), 
+                 signaling = c("APP"), remove.isolate = FALSE) +
+  coord_flip()
+```
+
+------------------------------------------------------------------------
+
+Plot the signaling gene expression distribution using violin/dot plot \_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_
+
+```{r}
+plotGeneExpression(cellchat, signaling = "APP", features=c("App", "Cd74"),
+                   enriched.only = TRUE, type = "violin")
+```
+
+------------------------------------------------------------------------
+
+## Identify signaling roles (e.g., dominant senders, receivers) of cell groups as well as the major contributing signaling
+
+|                                                         |
+|---------------------------------------------------------|
+| (A) Compute and visualize the network centrality scores |
+
+```{r}
+# Compute the network centrality scores
+cellchat <- netAnalysis_computeCentrality(cellchat, slot.name = "netP") # the slot 'netP' means the inferred intercellular communication network of signaling pathways
+# Visualize the computed centrality scores using heatmap, allowing ready identification of major signaling roles of cell groups
+netAnalysis_signalingRole_network(cellchat, signaling = pathways.show, width = 8, height = 2.5, font.size = 10)
+```
+
+Visualize dominant senders (sources) and receivers (targets) in a 2D space
+
+```{r}
+# Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+gg1 <- netAnalysis_signalingRole_scatter(cellchat)
+#> Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+# Signaling role analysis on the cell-cell communication networks of interest
+gg2 <- netAnalysis_signalingRole_scatter(cellchat, signaling = c("CXCL", "CCL"))
+#> Signaling role analysis on the cell-cell communication network from user's input
+gg1 + gg2
+```
+
+Identify signals contributing the most to outgoing or incoming signaling of certain cell groups
+
+```{r}
+# Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+ht1 <- netAnalysis_signalingRole_heatmap(cellchat, pattern = "outgoing")
+ht2 <- netAnalysis_signalingRole_heatmap(cellchat, pattern = "incoming")
+ht1 + ht2
+```
+
+|  |
+|------------------------------------------------------------------------|
+| Identify global communication patterns to explore how multiple cell types and signaling pathways coordinate together |
+
+Identify and visualize outgoing communication pattern of secreting cells Outgoing patterns reveal how the sender cells (i.e. cells as signal source) coordinate with each other as well as how they coordinate with certain signaling pathways to drive communication.
+
+```{r setup_2, include=TRUE}
+library(NMF)
+library(ggalluvial)
+```
+
+-   Identify and visualize outgoing communication
+
+```{r}
+selectK(cellchat, pattern = "outgoing")
+```
+
+```{r}
+nPatterns = 6
+cellchat <- identifyCommunicationPatterns(cellchat, pattern = "outgoing", k = nPatterns)
+```
+
+```{r}
+# river plot
+netAnalysis_river(cellchat, pattern = "outgoing")
+```
+
+```{r}
+# dot plot
+netAnalysis_dot(cellchat, pattern = "outgoing")
+```
+
+-   Identify and visualize incoming communication pattern of target cells
+
+```{r}
+selectK(cellchat, pattern = "incoming")
+
+```
+
+```{r}
+nPatterns = 6
+cellchat <- identifyCommunicationPatterns(cellchat, pattern = "incoming", k = nPatterns)
+```
+
+```{r}
+# river plot
+netAnalysis_river(cellchat, pattern = "incoming")
+```
+
+```{r}
+saveRDS(cellchat, file = "cellchat_gsto.rds")
+```
+
+### Extraction of pattern
+
+Some interactions are separated by hyphens ("-") or underscores ("\_"), while some genes are annotated in human nomenclature. These gene names are subsequently converted to their corresponding mouse nomenclature.
+
+```{r}
+#Split genes using _ or -, except for H2-
+separa_trattini_underscore <- function(nome) {
+  if (substr(nome, 1, 2) != "H2") {
+    nome <- gsub("-", " ", nome)  
+    nome <- gsub("_", " ", nome) 
+    return(unlist(strsplit(nome, " "))) 
+  } else {
+    return(nome)
+  }
+}
+library(org.Hs.eg.db)
+library(org.Mm.eg.db)
+library(Orthology.eg.db)
+
+#gene name conversion
+mapIt <- function(human_symbol ,morg, horg, orth){
+    husymb <- mapIds(horg, human_symbol, "ENTREZID", "SYMBOL")
+    mapped <- select(orth, husymb, "Mus_musculus", "Homo_sapiens")
+    names(mapped) <- c("Homo_egid", "Mus_egid")
+    mouseg <- select(morg, as.character(mapped[, 2]), "SYMBOL", "ENTREZID")
+    return(mouseg[, 2])
+}
+```
+
+#### Outgoing/ligand
+
+select the signaling pathways with a contribution of at least 0.5 (the same parameter used for the alluvial plot)
+
+```{r, message=FALSE}
+filtered_data <- cellchat@netP$pattern$outgoing$pattern$signalin[
+  cellchat@netP$pattern$outgoing$pattern$signalin$Contribution > 0.5, ]
+# list with signaling
+grouped_list <- split(filtered_data$Signaling, filtered_data$Pattern)
+
+print(grouped_list)
+
+#ligand in pattern
+
+ligand_out=lapply(names(grouped_list), function(ligands){
+  ligand_out<- unique(df.net$ligand[df.net$pathway_name %in% 
+                                      as.character(grouped_list[[ligands]])])
+  return(ligand_out)
+} )
+
+#split gene name 
+library(stringr)
+ligands_separati<-lapply(ligand_out, function(x) 
+  unlist(lapply(x, separa_trattini_underscore)))
+
+#gene name conversion
+
+map_human_to_mouse_mixed <- function(gene_list, morg, horg, orth) {
+  result <- data.frame(input = gene_list,
+                       status = NA_character_,
+                       human_entrez = NA_character_,
+                       mouse_entrez = NA_character_,
+                       mouse_symbol = NA_character_,
+                       stringsAsFactors = FALSE)
+  
+  for (i in seq_along(gene_list)) {
+    gene <- gene_list[i]
+    
+    # Controlla se esiste nei database
+    in_human <- gene %in% keys(horg, keytype = "SYMBOL")
+    in_mouse <- gene %in% keys(morg, keytype = "SYMBOL")
+    
+    if (in_human && !in_mouse) {
+      # Mappa simbolo umano → ENTREZ ID
+      h_entrez <- mapIds(horg, keys = gene, column = "ENTREZID",
+                         keytype = "SYMBOL", multiVals = "first")
+      
+      if (!is.na(h_entrez)) {
+        # Assicurati che sia un character per select()
+        h_entrez_chr <- as.character(h_entrez)
+        
+        orth_map <- AnnotationDbi::select(orth,
+                                          keys = h_entrez_chr,
+                                          columns = "Mus.musculus",
+                                          keytype = "Homo.sapiens")
+        
+        if (nrow(orth_map) > 0) {
+          m_entrez <- as.character(orth_map$Mus.musculus[1])
+          m_symbol <- mapIds(morg, keys = m_entrez,
+                             column = "SYMBOL", keytype = "ENTREZID", multiVals = "first")
+          
+          result$status[i] <- "converted"
+          result$human_entrez[i] <- h_entrez
+          result$mouse_entrez[i] <- m_entrez
+          result$mouse_symbol[i] <- m_symbol
+        } else {
+          result$status[i] <- "no_mouse_match"
+          result$human_entrez[i] <- h_entrez
+        }
+      } else {
+        result$status[i] <- "not_in_human_db"
+      }
+      
+    } else if (in_mouse) {
+      result$status[i] <- "already_mouse"
+      result$mouse_symbol[i] <- gene
+    } else {
+      result$status[i] <- "ambiguous_or_unknown"
+    }
+  }
+  
+  return(result)
+}
+
+ligand_separati_converted <- lapply(ligands_separati, function(x) 
+  map_human_to_mouse_mixed(unique(x), org.Mm.eg.db, org.Hs.eg.db, Orthology.eg.db))
+
+#save file 
+
+ligand_list <- lapply(ligand_separati_converted, function(x) x$mouse_symbol)
+ligand_list <- lapply(mouse_symbols_list, function(col) {
+  col[!is.na(col) & col != ""]
+})
+names(ligand_list) <- paste0("Pattern_", seq_along(ligand_list))
+
+# Crea un data frame con una colonna per ogni gruppo, padding con NA dove serve
+max_len <- max(sapply(ligand_list, length))
+ligand_df <- as.data.frame(lapply(ligand_list, function(col) {
+  length(col) <- max_len  # estende con NA
+  col[is.na(col)] <- ""   # Sostituisci NA con stringhe vuote
+  return(col)
+}), stringsAsFactors = FALSE)
+
+write.csv(ligand_df, file = "~/Documents/Cellchat/ligand_pattern6.csv")
+
+```
+
+#### Incoming/receptor
+
+``` {r, message=FALSE}
+filtered_incoming <- cellchat@netP$pattern$incoming$pattern$signalin[
+  cellchat@netP$pattern$incoming$pattern$signalin$Contribution > 0.5, ]
+# list with signaling
+grouped_list_in <- split(filtered_incoming$Signaling, filtered_incoming$Pattern)
+
+print(grouped_list_in)
+
+#ligand in pattern
+
+receptor_in=lapply(names(grouped_list_in), function(receptor){
+  receptor_in<- unique(df.net$receptor[df.net$pathway_name %in% 
+                                      as.character(grouped_list_in[[receptor]])])
+  return(receptor_in)
+} )
+
+#split gene name 
+library(stringr)
+receptor_separati<-lapply(receptor_in, function(x) 
+  unlist(lapply(x, separa_trattini_underscore)))
+
+#gene name conversion 
+
+converti_geni <- function(genes, org_db) {
+  # Eseguiamo la conversione per ogni gene
+  converted_genes <- sapply(genes, function(gene) {
+    # Verifica se il gene è presente nel database
+    result <- tryCatch({
+      mapIt(gene, org.Mm.eg.db, org.Hs.eg.db, Orthology.eg.db)
+    }, error = function(e) {
+      return(NA)  # If gene is not indatabase return NA
+    })
+    
+    # If the conversion is possible (i.e., not NA), return the converted gene
+    if (!is.na(result)) {
+      return(result)
+    } else {
+      return(gene)  #If the conversion is NOT possible (NA) return the original gene
+    }
+  })
+  
+  return(converted_genes)
+}
+
+receptor_separati_converted <- lapply(receptor_separati, function(x) 
+  converti_geni(unique(x), org.Hs.eg.db))
+
+print(receptor_separati_converted)
+
+receptor_separati_converted<- lapply(receptor_separati_converted, unique)
+
+#save file
+
+names(receptor_separati_converted) <- paste("Pattern", 
+                                            seq_along(receptor_separati_converted), 
+                                            sep = "")
+
+
+max.length <- max(sapply(receptor_separati_converted, length))
+ l <- lapply(receptor_separati_converted, function(v) { c(v, rep(NA, max.length-length(v)))})
+l<- do.call(cbind, l)
+
+write.csv(l, "~/Documents/Cellchat/receptor_2.csv")
+
+```
+```{r}
+par(mfrow=c(2,2))
+for (gene in genes) {
+  tryCatch({
+    # Crea il plot per ogni gene separato
+    plot_output <- plotGeneExpression(cellchat, features = gene, enriched.only = TRUE, type = "violin")
+    
+    # Usa print per forzare la visualizzazione del grafico
+    print(plot_output)
+    
+  }, error = function(e) {
+    # Se c'è un errore (ad esempio, il gene non è presente nei dati), ignora e prosegui
+    message(paste("Errore con il gene:", gene, "- ignorato."))
+  })
+}
+
+```
+
