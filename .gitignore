@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
+
+# Python
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Dati grezzi e risultati
+data/
+results/
+
+# Ambienti virtuali
+.venv/
+env/
